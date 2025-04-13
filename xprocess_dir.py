@@ -40,7 +40,7 @@ def parse_dir_output(file_name):
     else:
         print("file:", file_name, "not found")
     for date, time, size, directory in results:
-        print(f"{date} {time}   {size}   {directory}")
+        print(f"{date} {time} {size:>12}   {directory}")
 
 from sys import argv, exit
 if len(argv) < 2:
