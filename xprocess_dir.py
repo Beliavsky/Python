@@ -1,49 +1,74 @@
 import subprocess
 import re
+import glob
+from sys import argv, exit
 
-def parse_dir_output(file_name):
-    """ Reformats 'dir /s' command output for a file into a table
-    showing date, time, size, and directory. """
+def parse_dir_output(file_name, sort_instances=False):
+    """Reformats 'dir /s' command output for a file into a table
+    showing date, time, size, and directory.
+    If sort_instances is True, entries are sorted by file size (descending)."""
     # Run the dir /s command
-    result = subprocess.run(['dir', '/s', file_name], capture_output=True, text=True, shell=True)
+    result = subprocess.run(
+        ['dir', '/s', file_name], capture_output=True, text=True, shell=True
+    )
     output = result.stdout
 
-    # Regex patterns to match directory and file lines
+    # Patterns for directory header and file entries
     dir_pattern = re.compile(r'Directory of (.*?)\s*$')
-    file_pattern = re.compile(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}\s+[AP]M)\s+([\d,]+)\s+' + re.escape(file_name))
+    file_pattern = re.compile(
+        rf"(\d{{2}}/\d{{2}}/\d{{4}})\s+(\d{{2}}:\d{{2}}\s+[AP]M)\s+([\d,]+)\s+{re.escape(file_name)}"
+    )
 
     current_dir = ''
-    results = []
+    instances = []
 
-    # Process each line of the output
-    lines = output.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        # Check for directory line
-        dir_match = dir_pattern.match(line)
-        if dir_match:
-            current_dir = dir_match.group(1).strip()
-            i += 1
+    for line in output.splitlines():
+        line = line.strip()
+        # Directory header
+        m_dir = dir_pattern.match(line)
+        if m_dir:
+            current_dir = m_dir.group(1).strip()
             continue
 
-        # Check for file line
-        file_match = file_pattern.match(line)
-        if file_match:
-            date, time, size = file_match.groups()
-            results.append((date, time, size.replace(',', ''), current_dir))
-        i += 1
+        # File entry
+        m_file = file_pattern.match(line)
+        if m_file:
+            date, time, size_str = m_file.groups()
+            size = int(size_str.replace(',', ''))
+            instances.append((date, time, size, current_dir))
 
-    # Print formatted table
-    if results:
-        print("file:", file_name)
+    # Sort instances by size if requested
+    if sort_instances:
+        instances.sort(key=lambda x: x[2], reverse=True)
+
+    # Output
+    if instances:
+        print(f"\nfile: {file_name}")
+        for date, time, size, directory in instances:
+            print(f"{date} {time} {size:>12}   {directory}")
     else:
-        print("file:", file_name, "not found")
-    for date, time, size, directory in results:
-        print(f"{date} {time} {size:>12}   {directory}")
+        print(f"file: {file_name} not found")
 
-from sys import argv, exit
-if len(argv) < 2:
-    exit("usage: python xprocess_dir.py <file_name>")
-file_name = argv[1]
-parse_dir_output(file_name)
+
+if __name__ == '__main__':
+    if len(argv) < 2:
+        exit("usage: python xprocess_dir.py <file_or_glob> [--sort-instances]")
+
+    pattern = argv[1]
+    sort_instances = False
+    # Optional flag to sort each file's instances by size
+    if len(argv) > 2 and argv[2] in ('-s', '--sort-instances'):
+        sort_instances = True
+
+    # Expand glob if needed
+    if any(c in pattern for c in ('*', '?', '[')):
+        files = glob.glob(pattern)
+        if not files:
+            exit(f"No files match pattern: {pattern}")
+        files = sorted(files)
+    else:
+        files = [pattern]
+
+    # Process each file
+    for fname in files:
+        parse_dir_output(fname, sort_instances)
