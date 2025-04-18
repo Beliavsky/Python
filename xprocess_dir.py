@@ -4,7 +4,7 @@ import glob
 from sys import argv, exit
 
 def parse_dir_output(file_name, sort_instances=False):
-    """Reformats 'dir /s' command output for a file into a table
+    """Reformats Windows CMD 'dir /s' command output for a file into a table
     showing date, time, size, and directory.
     If sort_instances is True, entries are sorted by file size (descending)."""
     # Run the dir /s command
