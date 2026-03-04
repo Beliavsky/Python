@@ -2191,6 +2191,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "take"
+                and len(node.args) >= 2
+            ):
+                return self._expr_kind(node.args[0])
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr == "min"
                 and len(node.args) >= 1
             ):
@@ -2429,6 +2437,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "take"
+                and len(node.args) >= 2
+            ):
+                return f"size({self.expr(node.args[1])})"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr in {"matmul", "dot", "identity"}
                 and len(node.args) >= 1
             ):
@@ -2612,6 +2628,8 @@ class translator(ast.NodeVisitor):
                     return self._rank_expr(node.args[0])
                 if node.func.attr in {"pad", "roll", "flip"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
+                if node.func.attr == "take" and len(node.args) >= 2:
+                    return self._rank_expr(node.args[1])
                 if node.func.attr == "bincount" and len(node.args) >= 1:
                     return 1
                 if node.func.attr == "searchsorted" and len(node.args) >= 2:
@@ -4379,6 +4397,16 @@ class translator(ast.NodeVisitor):
                 if side == "right":
                     return f"searchsorted_right_int({a0}, {v0})"
                 return f"searchsorted_left_int({a0}, {v0})"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr == "take"
+                and len(node.args) >= 2
+            ):
+                a0 = self.expr(node.args[0])
+                idx = self.expr(node.args[1])
+                return f"{a0}({idx} + 1)"
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -6673,6 +6701,44 @@ class translator(ast.NodeVisitor):
             and c.func.value.id == "np"
             and c.func.attr == "set_printoptions"
         ):
+            return
+
+        if (
+            isinstance(c.func, ast.Attribute)
+            and isinstance(c.func.value, ast.Name)
+            and c.func.value.id == "np"
+            and c.func.attr == "put"
+            and len(c.args) >= 3
+        ):
+            arr = self.expr(c.args[0])
+            idx = self.expr(c.args[1])
+            vals = self.expr(c.args[2])
+            vals_rank = self._rank_expr(c.args[2])
+            vals_kind = self._expr_kind(c.args[2])
+            self.o.w("block")
+            self.o.push()
+            self.o.w("integer :: i_put, n_put")
+            if vals_rank > 0:
+                if vals_kind == "int":
+                    self.o.w("integer, allocatable :: vals_put(:)")
+                elif vals_kind == "logical":
+                    self.o.w("logical, allocatable :: vals_put(:)")
+                else:
+                    self.o.w("real(kind=dp), allocatable :: vals_put(:)")
+                self.o.w(f"vals_put = {vals}")
+            self.o.w(f"n_put = size({idx})")
+            if vals_rank > 0:
+                self.o.w("n_put = min(n_put, size(vals_put))")
+            self.o.w("do i_put = 1, n_put")
+            self.o.push()
+            if vals_rank > 0:
+                self.o.w(f"{arr}({idx}(i_put) + 1) = vals_put(i_put)")
+            else:
+                self.o.w(f"{arr}({idx}(i_put) + 1) = {vals}")
+            self.o.pop()
+            self.o.w("end do")
+            self.o.pop()
+            self.o.w("end block")
             return
 
         if isinstance(c.func, ast.Name) and c.func.id == "print":
