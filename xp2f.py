@@ -726,6 +726,7 @@ def detect_needed_helpers(tree):
         "tile": {"tile"},
         "unique": {"unique"},
         "bincount": {"bincount_int"},
+        "searchsorted": {"searchsorted_left_int", "searchsorted_right_int"},
         "mean": {"mean"},
         "var": {"var"},
         "std": {"std"},
@@ -1352,6 +1353,56 @@ def runtime_helper_templates():
          end do
       end function bincount_int"""
 
+    ssl_pub = (
+        "public :: searchsorted_left_int !@pyapi kind=function ret=integer(:) "
+        "args=a:integer(:):intent(in),v:integer(:):intent(in) desc=\"searchsorted left indices for integer vectors\""
+    )
+    ssl_blk = """      function searchsorted_left_int(a, v) result(idx)
+         integer, intent(in) :: a(:), v(:)
+         integer, allocatable :: idx(:)
+         integer :: i, lo, hi, mid, n
+         n = size(a)
+         allocate(idx(1:size(v)))
+         do i = 1, size(v)
+            lo = 1
+            hi = n + 1
+            do while (lo < hi)
+               mid = (lo + hi) / 2
+               if (mid <= n .and. a(mid) < v(i)) then
+                  lo = mid + 1
+               else
+                  hi = mid
+               end if
+            end do
+            idx(i) = lo - 1
+         end do
+      end function searchsorted_left_int"""
+
+    ssr_pub = (
+        "public :: searchsorted_right_int !@pyapi kind=function ret=integer(:) "
+        "args=a:integer(:):intent(in),v:integer(:):intent(in) desc=\"searchsorted right indices for integer vectors\""
+    )
+    ssr_blk = """      function searchsorted_right_int(a, v) result(idx)
+         integer, intent(in) :: a(:), v(:)
+         integer, allocatable :: idx(:)
+         integer :: i, lo, hi, mid, n
+         n = size(a)
+         allocate(idx(1:size(v)))
+         do i = 1, size(v)
+            lo = 1
+            hi = n + 1
+            do while (lo < hi)
+               mid = (lo + hi) / 2
+               if (mid <= n .and. a(mid) <= v(i)) then
+                  lo = mid + 1
+               else
+                  hi = mid
+               end if
+            end do
+            idx(i) = lo - 1
+         end do
+      end function searchsorted_right_int"""
+
     nansum_pub = (
         "public :: nansum !@pyapi kind=function ret=real(dp) "
         "args=x:real(dp)(:):intent(in) desc=\"sum ignoring NaN values\""
@@ -1557,6 +1608,8 @@ def runtime_helper_templates():
         "mean_1d": (mean_pub, mean_blk),
         "var_1d": (var_pub, var_blk),
         "bincount_int": (bcnt_pub, bcnt_blk),
+        "searchsorted_left_int": (ssl_pub, ssl_blk),
+        "searchsorted_right_int": (ssr_pub, ssr_blk),
         "nansum": (nansum_pub, nansum_blk),
         "nanmean": (nanmean_pub, nanmean_blk),
         "nanvar": (nanvar_pub, nanvar_blk),
@@ -2075,6 +2128,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "searchsorted"
+                and len(node.args) >= 2
+            ):
+                return "int"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr in {"mean", "var", "std", "log2", "log10", "nansum", "nanmean", "nanvar", "nanstd", "nanmin", "nanmax"}
                 and len(node.args) >= 1
             ):
@@ -2360,6 +2421,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "searchsorted"
+                and len(node.args) >= 2
+            ):
+                return f"size({self.expr(node.args[1])})"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr in {"matmul", "dot", "identity"}
                 and len(node.args) >= 1
             ):
@@ -2545,6 +2614,8 @@ class translator(ast.NodeVisitor):
                     return self._rank_expr(node.args[0])
                 if node.func.attr == "bincount" and len(node.args) >= 1:
                     return 1
+                if node.func.attr == "searchsorted" and len(node.args) >= 2:
+                    return self._rank_expr(node.args[1])
                 if node.func.attr == "broadcast_to" and len(node.args) >= 2:
                     shp = node.args[1]
                     if isinstance(shp, (ast.Tuple, ast.List)):
@@ -4289,6 +4360,25 @@ class translator(ast.NodeVisitor):
                 if minlength is None:
                     return f"bincount_int({a0})"
                 return f"bincount_int({a0}, int({minlength}))"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr == "searchsorted"
+                and len(node.args) >= 2
+            ):
+                a0 = self.expr(node.args[0])
+                v0 = self.expr(node.args[1])
+                side = "left"
+                for kw in node.keywords:
+                    if kw.arg == "side" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        side = kw.value.value.lower()
+                        break
+                if len(node.args) >= 3 and isinstance(node.args[2], ast.Constant) and isinstance(node.args[2].value, str):
+                    side = str(node.args[2].value).lower()
+                if side == "right":
+                    return f"searchsorted_right_int({a0}, {v0})"
+                return f"searchsorted_left_int({a0}, {v0})"
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)

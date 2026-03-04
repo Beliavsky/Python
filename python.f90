@@ -64,6 +64,8 @@ public :: tile_real_2d !@pyapi kind=function ret=real(dp)(:,:) args=x:real(dp)(:
 public :: eye_real !@pyapi kind=function ret=real(dp)(:,:) args=n:integer:intent(in),m:integer:intent(in):optional desc="return n x m identity-like matrix (default m=n)"
 public :: unique_real !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="sorted unique values of real vector"
 public :: bincount_int !@pyapi kind=function ret=integer(:) args=x:integer(:):intent(in),minlength:integer:intent(in):optional desc="count occurrences of nonnegative integers"
+public :: searchsorted_left_int !@pyapi kind=function ret=integer(:) args=a:integer(:):intent(in),v:integer(:):intent(in) desc="searchsorted left indices for integer vectors"
+public :: searchsorted_right_int !@pyapi kind=function ret=integer(:) args=a:integer(:):intent(in),v:integer(:):intent(in) desc="searchsorted right indices for integer vectors"
 public :: cumprod_real !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="cumulative product of real vector"
 public :: gradient_1d !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="1D gradient with unit spacing (numpy-style edge handling)"
 public :: linalg_solve !@pyapi kind=function ret=real(dp)(:) args=a:real(dp)(:,:):intent(in),b:real(dp)(:):intent(in) desc="solve linear system A x = b using LAPACK DGESV"
@@ -412,6 +414,48 @@ contains
             c(x(i) + 1) = c(x(i) + 1) + 1
          end do
       end function bincount_int
+
+      function searchsorted_left_int(a, v) result(idx)
+         integer, intent(in) :: a(:), v(:)
+         integer, allocatable :: idx(:)
+         integer :: i, lo, hi, mid, n
+         n = size(a)
+         allocate(idx(1:size(v)))
+         do i = 1, size(v)
+            lo = 1
+            hi = n + 1
+            do while (lo < hi)
+               mid = (lo + hi) / 2
+               if (mid <= n .and. a(mid) < v(i)) then
+                  lo = mid + 1
+               else
+                  hi = mid
+               end if
+            end do
+            idx(i) = lo - 1
+         end do
+      end function searchsorted_left_int
+
+      function searchsorted_right_int(a, v) result(idx)
+         integer, intent(in) :: a(:), v(:)
+         integer, allocatable :: idx(:)
+         integer :: i, lo, hi, mid, n
+         n = size(a)
+         allocate(idx(1:size(v)))
+         do i = 1, size(v)
+            lo = 1
+            hi = n + 1
+            do while (lo < hi)
+               mid = (lo + hi) / 2
+               if (mid <= n .and. a(mid) <= v(i)) then
+                  lo = mid + 1
+               else
+                  hi = mid
+               end if
+            end do
+            idx(i) = lo - 1
+         end do
+      end function searchsorted_right_int
 
       pure real(kind=dp) function mean_1d(x)
          real(kind=dp), intent(in) :: x(:)
