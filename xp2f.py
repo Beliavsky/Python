@@ -2084,6 +2084,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "broadcast_to"
+                and len(node.args) >= 1
+            ):
+                return self._expr_kind(node.args[0])
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr == "min"
                 and len(node.args) >= 1
             ):
@@ -2237,7 +2245,7 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
-                and node.func.attr in {"log", "exp", "sqrt", "maximum", "asarray", "ascontiguousarray", "asfortranarray"}
+                and node.func.attr in {"log", "exp", "sqrt", "maximum", "asarray", "ascontiguousarray", "asfortranarray", "broadcast_to"}
                 and len(node.args) >= 1
             ):
                 return self._extent_expr(node.args[0])
@@ -2245,7 +2253,7 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
-                and node.func.attr in {"cumsum", "cumprod", "repeat", "tile", "unique", "stack", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "squeeze", "zeros_like", "ones_like", "full_like", "clip", "diff", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan", "ascontiguousarray", "asfortranarray"}
+                and node.func.attr in {"cumsum", "cumprod", "repeat", "tile", "unique", "stack", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "squeeze", "zeros_like", "ones_like", "full_like", "clip", "diff", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan", "ascontiguousarray", "asfortranarray", "broadcast_to"}
                 and len(node.args) >= 1
             ):
                 return self._extent_expr(node.args[0])
@@ -2489,6 +2497,11 @@ class translator(ast.NodeVisitor):
                     return self._rank_expr(node.args[0])
                 if node.func.attr in {"pad", "roll", "flip"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
+                if node.func.attr == "broadcast_to" and len(node.args) >= 2:
+                    shp = node.args[1]
+                    if isinstance(shp, (ast.Tuple, ast.List)):
+                        return max(1, len(shp.elts))
+                    return max(1, self._rank_expr(node.args[0]))
                 if node.func.attr == "expand_dims" and len(node.args) >= 1:
                     return self._rank_expr(node.args[0]) + 1
                 if node.func.attr == "squeeze" and len(node.args) >= 1:
@@ -3580,6 +3593,42 @@ class translator(ast.NodeVisitor):
                 shp = ", ".join([f"size({a0},{p})" for p in perm])
                 ordp = ", ".join(str(p) for p in perm)
                 return f"reshape({a0}, [{shp}], order=[{ordp}])"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr == "broadcast_to"
+                and len(node.args) >= 2
+            ):
+                a0 = self.expr(node.args[0])
+                r0 = self._rank_expr(node.args[0])
+                shp = node.args[1]
+                if not isinstance(shp, (ast.Tuple, ast.List)):
+                    raise NotImplementedError("np.broadcast_to shape must be tuple/list in this transpiler path")
+                dims = [self.expr(e) for e in shp.elts]
+                if len(dims) == 1:
+                    n0 = dims[0]
+                    if r0 == 0:
+                        return f"[( {a0}, i_bt = 1, ({n0}) )]"
+                    if r0 == 1:
+                        return f"{a0}(1:{n0})"
+                    return f"reshape({a0}, [{n0}])"
+                if len(dims) == 2:
+                    n0, n1 = dims[0], dims[1]
+                    if r0 == 0:
+                        return f"reshape([( {a0}, i_bt = 1, ({n0})*({n1}) )], [{n0}, {n1}])"
+                    if r0 == 1:
+                        if self._is_col2_expr(node.args[0]):
+                            return f"spread({a0}, dim=2, ncopies={n1})"
+                        return f"spread({a0}, dim=1, ncopies={n0})"
+                    if r0 == 2:
+                        return (
+                            f"merge("
+                            f"spread({a0}(1,:), dim=1, ncopies={n0}), "
+                            f"spread({a0}(:,1), dim=2, ncopies={n1}), "
+                            f"(size({a0},1) == 1))"
+                        )
+                raise NotImplementedError("np.broadcast_to currently supports target rank up to 2")
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
