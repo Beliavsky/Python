@@ -725,6 +725,7 @@ def detect_needed_helpers(tree):
         "repeat": {"repeat"},
         "tile": {"tile"},
         "unique": {"unique"},
+        "bincount": {"bincount_int"},
         "mean": {"mean"},
         "var": {"var"},
         "std": {"std"},
@@ -1323,6 +1324,34 @@ def runtime_helper_templates():
          var_1d = sum((x - mu)**2) / real(n - d, kind=dp)
       end function var_1d"""
 
+    bcnt_pub = (
+        "public :: bincount_int !@pyapi kind=function ret=integer(:) "
+        "args=x:integer(:):intent(in),minlength:integer:intent(in):optional desc=\"count occurrences of nonnegative integers\""
+    )
+    bcnt_blk = """      function bincount_int(x, minlength) result(c)
+         integer, intent(in) :: x(:)
+         integer, intent(in), optional :: minlength
+         integer, allocatable :: c(:)
+         integer :: i, nmax, nout, m
+         if (present(minlength)) then
+            m = max(0, minlength)
+         else
+            m = 0
+         end if
+         if (size(x) <= 0) then
+            nout = m
+            allocate(c(1:nout), source=0)
+            return
+         end if
+         if (any(x < 0)) error stop 'bincount_int: negative values are not supported'
+         nmax = maxval(x)
+         nout = max(nmax + 1, m)
+         allocate(c(1:nout), source=0)
+         do i = 1, size(x)
+            c(x(i) + 1) = c(x(i) + 1) + 1
+         end do
+      end function bincount_int"""
+
     nansum_pub = (
         "public :: nansum !@pyapi kind=function ret=real(dp) "
         "args=x:real(dp)(:):intent(in) desc=\"sum ignoring NaN values\""
@@ -1527,6 +1556,7 @@ def runtime_helper_templates():
         "argsort": (argsort_pub, argsort_blk),
         "mean_1d": (mean_pub, mean_blk),
         "var_1d": (var_pub, var_blk),
+        "bincount_int": (bcnt_pub, bcnt_blk),
         "nansum": (nansum_pub, nansum_blk),
         "nanmean": (nanmean_pub, nanmean_blk),
         "nanvar": (nanvar_pub, nanvar_blk),
@@ -2037,6 +2067,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "bincount"
+                and len(node.args) >= 1
+            ):
+                return "int"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr in {"mean", "var", "std", "log2", "log10", "nansum", "nanmean", "nanvar", "nanstd", "nanmin", "nanmax"}
                 and len(node.args) >= 1
             ):
@@ -2314,6 +2352,14 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
+                and node.func.attr == "bincount"
+                and len(node.args) >= 1
+            ):
+                return f"size({self.expr(node.args[0])})"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
                 and node.func.attr in {"matmul", "dot", "identity"}
                 and len(node.args) >= 1
             ):
@@ -2497,6 +2543,8 @@ class translator(ast.NodeVisitor):
                     return self._rank_expr(node.args[0])
                 if node.func.attr in {"pad", "roll", "flip"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
+                if node.func.attr == "bincount" and len(node.args) >= 1:
+                    return 1
                 if node.func.attr == "broadcast_to" and len(node.args) >= 2:
                     shp = node.args[1]
                     if isinstance(shp, (ast.Tuple, ast.List)):
@@ -4223,6 +4271,24 @@ class translator(ast.NodeVisitor):
                             break
                     return f"{node.func.attr}({a0}, int({reps}))"
                 return f"{node.func.attr}({a0})"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr == "bincount"
+                and len(node.args) >= 1
+            ):
+                a0 = self.expr(node.args[0])
+                minlength = None
+                if len(node.args) >= 2:
+                    minlength = self.expr(node.args[1])
+                for kw in node.keywords:
+                    if kw.arg == "minlength":
+                        minlength = self.expr(kw.value)
+                        break
+                if minlength is None:
+                    return f"bincount_int({a0})"
+                return f"bincount_int({a0}, int({minlength}))"
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)

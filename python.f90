@@ -63,6 +63,7 @@ public :: tile_real !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):int
 public :: tile_real_2d !@pyapi kind=function ret=real(dp)(:,:) args=x:real(dp)(:,:):intent(in),reps0:integer:intent(in),reps1:integer:intent(in) desc="tile real matrix reps0 x reps1 times"
 public :: eye_real !@pyapi kind=function ret=real(dp)(:,:) args=n:integer:intent(in),m:integer:intent(in):optional desc="return n x m identity-like matrix (default m=n)"
 public :: unique_real !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="sorted unique values of real vector"
+public :: bincount_int !@pyapi kind=function ret=integer(:) args=x:integer(:):intent(in),minlength:integer:intent(in):optional desc="count occurrences of nonnegative integers"
 public :: cumprod_real !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="cumulative product of real vector"
 public :: gradient_1d !@pyapi kind=function ret=real(dp)(:) args=x:real(dp)(:):intent(in) desc="1D gradient with unit spacing (numpy-style edge handling)"
 public :: linalg_solve !@pyapi kind=function ret=real(dp)(:) args=a:real(dp)(:,:):intent(in),b:real(dp)(:):intent(in) desc="solve linear system A x = b using LAPACK DGESV"
@@ -387,6 +388,30 @@ contains
             x(i) = start + (i - 1) * s
          end do
       end function arange_int
+
+      function bincount_int(x, minlength) result(c)
+         integer, intent(in) :: x(:)
+         integer, intent(in), optional :: minlength
+         integer, allocatable :: c(:)
+         integer :: i, nmax, nout, m
+         if (present(minlength)) then
+            m = max(0, minlength)
+         else
+            m = 0
+         end if
+         if (size(x) <= 0) then
+            nout = m
+            allocate(c(1:nout), source=0)
+            return
+         end if
+         if (any(x < 0)) error stop 'bincount_int: negative values are not supported'
+         nmax = maxval(x)
+         nout = max(nmax + 1, m)
+         allocate(c(1:nout), source=0)
+         do i = 1, size(x)
+            c(x(i) + 1) = c(x(i) + 1) + 1
+         end do
+      end function bincount_int
 
       pure real(kind=dp) function mean_1d(x)
          real(kind=dp), intent(in) :: x(:)
