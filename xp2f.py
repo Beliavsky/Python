@@ -1827,6 +1827,9 @@ class translator(ast.NodeVisitor):
         if isinstance(node, ast.Attribute):
             if node.attr == "size" and isinstance(node.value, ast.Name):
                 return "int"
+            if node.attr in {"c_contiguous", "f_contiguous"}:
+                if isinstance(node.value, ast.Attribute) and node.value.attr == "flags":
+                    return "logical"
             if node.attr == "T":
                 return self._expr_kind(node.value)
             if isinstance(node.value, ast.Name) and node.value.id == "np" and node.attr in {"pi", "nan", "inf", "NINF"}:
@@ -2073,7 +2076,7 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
-                and node.func.attr in {"prod", "dot", "matmul", "clip", "diff", "full_like", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "abs", "fabs", "sign", "floor", "ceil", "round"}
+                and node.func.attr in {"prod", "dot", "matmul", "clip", "diff", "full_like", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "abs", "fabs", "sign", "floor", "ceil", "round", "ascontiguousarray", "asfortranarray"}
                 and len(node.args) >= 1
             ):
                 return self._expr_kind(node.args[0])
@@ -2234,7 +2237,7 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
-                and node.func.attr in {"log", "exp", "sqrt", "maximum", "asarray"}
+                and node.func.attr in {"log", "exp", "sqrt", "maximum", "asarray", "ascontiguousarray", "asfortranarray"}
                 and len(node.args) >= 1
             ):
                 return self._extent_expr(node.args[0])
@@ -2242,7 +2245,7 @@ class translator(ast.NodeVisitor):
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
-                and node.func.attr in {"cumsum", "cumprod", "repeat", "tile", "unique", "stack", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "squeeze", "zeros_like", "ones_like", "full_like", "clip", "diff", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan"}
+                and node.func.attr in {"cumsum", "cumprod", "repeat", "tile", "unique", "stack", "hstack", "vstack", "column_stack", "concatenate", "transpose", "swapaxes", "expand_dims", "squeeze", "zeros_like", "ones_like", "full_like", "clip", "diff", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan", "ascontiguousarray", "asfortranarray"}
                 and len(node.args) >= 1
             ):
                 return self._extent_expr(node.args[0])
@@ -2482,7 +2485,7 @@ class translator(ast.NodeVisitor):
                     return 1
                 if node.func.attr in {"zeros_like", "ones_like"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
-                if node.func.attr in {"full_like", "clip", "transpose", "swapaxes", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan", "gradient"} and len(node.args) >= 1:
+                if node.func.attr in {"full_like", "clip", "transpose", "swapaxes", "abs", "fabs", "sign", "floor", "ceil", "round", "isfinite", "isinf", "isnan", "gradient", "ascontiguousarray", "asfortranarray"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
                 if node.func.attr in {"pad", "roll", "flip"} and len(node.args) >= 1:
                     return self._rank_expr(node.args[0])
@@ -3249,6 +3252,14 @@ class translator(ast.NodeVisitor):
                 if "int" in dtype_txt:
                     return f"int({a0})"
                 return a0
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr in {"ascontiguousarray", "asfortranarray"}
+                and len(node.args) >= 1
+            ):
+                return self.expr(node.args[0])
             if (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -4264,6 +4275,12 @@ class translator(ast.NodeVisitor):
             call_txt = ast.unparse(node) if hasattr(ast, "unparse") else ast.dump(node, include_attributes=False)
             raise NotImplementedError(f"unsupported call: {call_txt}")
         if isinstance(node, ast.Attribute):
+            if node.attr in {"c_contiguous", "f_contiguous"}:
+                if (
+                    isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "flags"
+                ):
+                    return ".true."
             if node.attr == "size":
                 return f"size({self.expr(node.value)})"
             if node.attr == "T":
@@ -6932,6 +6949,10 @@ def _emit_local_function(
         if a.arg in dict_arg_names:
             continue
         rr = _pre_arg_rank(a.arg)
+        if local_func_arg_ranks is not None and fn.name in local_func_arg_ranks:
+            idx = next((i for i, aa in enumerate(fn.args.args) if aa.arg == a.arg), -1)
+            if idx >= 0 and idx < len(local_func_arg_ranks[fn.name]):
+                rr = max(rr, int(local_func_arg_ranks[fn.name][idx]))
         if rr > 0:
             tr._mark_alloc_real(a.arg, rank=rr)
 
@@ -7284,14 +7305,34 @@ def _emit_local_function(
     o.w("")
 
 
-def _local_return_maps(local_funcs, params):
+def _local_return_maps(local_funcs, params, arg_rank_hints=None, arg_kind_hints=None):
     tuple_out = {}
     scalar_or_array = {}
+    arg_rank_hints = arg_rank_hints or {}
+    arg_kind_hints = arg_kind_hints or {}
     for fn in (local_funcs or []):
         if fn.name in {"log_normal_pdf_1d", "normal_logpdf_1d"}:
             scalar_or_array[fn.name] = "alloc_real"
             continue
         tr = translator(emit(), params={}, context="flat", list_counts={}, function_result_name=f"{fn.name}_result")
+        # Seed argument rank/kind from call-site observations when available.
+        rr_h = arg_rank_hints.get(fn.name, [])
+        rk_h = arg_kind_hints.get(fn.name, [])
+        for i, a in enumerate(fn.args.args):
+            rr = rr_h[i] if i < len(rr_h) else 0
+            rk = rk_h[i] if i < len(rk_h) else None
+            if rr > 0:
+                if rk == "int":
+                    tr._mark_alloc_int(a.arg, rank=rr)
+                elif rk == "logical":
+                    tr._mark_alloc_log(a.arg, rank=rr)
+                else:
+                    tr._mark_alloc_real(a.arg, rank=rr)
+            else:
+                if rk == "int":
+                    tr._mark_int(a.arg)
+                elif rk == "real":
+                    tr._mark_real(a.arg)
         tr.prescan(fn.body)
         rets = [s for s in fn.body if isinstance(s, ast.Return) and s.value is not None]
         if not rets:
@@ -7364,10 +7405,40 @@ def generate_flat(
                     rr = max(rr, 2 if axis_present else 1)
         return rr
 
-    local_return_specs, tuple_return_out_kinds = _local_return_maps(local_funcs, params)
+    # Gather call-site rank/kind hints for local function arguments.
+    call_rank_hints = {fn.name: [0 for _ in fn.args.args] for fn in (local_funcs or [])}
+    call_kind_hints = {fn.name: [None for _ in fn.args.args] for fn in (local_funcs or [])}
+    if local_funcs:
+        tr_seed = translator(emit(), params=params, context="flat", list_counts=list_counts)
+        tr_seed.prescan(tree.body)
+        for st in tree.body:
+            for n in ast.walk(st):
+                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in call_rank_hints):
+                    continue
+                rr = call_rank_hints[n.func.id]
+                rk = call_kind_hints[n.func.id]
+                for i, a in enumerate(n.args):
+                    if i >= len(rr):
+                        break
+                    rr[i] = max(rr[i], tr_seed._rank_expr(a))
+                    ak = tr_seed._expr_kind(a)
+                    if rk[i] is None and ak is not None:
+                        rk[i] = ak
+
+    local_return_specs, tuple_return_out_kinds = _local_return_maps(
+        local_funcs,
+        params,
+        arg_rank_hints=call_rank_hints,
+        arg_kind_hints=call_kind_hints,
+    )
     local_func_arg_ranks = {}
     for fn in (local_funcs or []):
-        local_func_arg_ranks[fn.name] = [_infer_arg_rank_in_fn(fn, a.arg) for a in fn.args.args]
+        base_ranks = [_infer_arg_rank_in_fn(fn, a.arg) for a in fn.args.args]
+        hint_ranks = call_rank_hints.get(fn.name, [])
+        local_func_arg_ranks[fn.name] = [
+            max(base_ranks[i], (hint_ranks[i] if i < len(hint_ranks) else 0))
+            for i in range(len(base_ranks))
+        ]
     dict_return_specs = {}
     dict_return_types = {}
     dict_type_components = {}
@@ -7932,7 +8003,7 @@ def transpile_file(py_path, helper_paths, flat, no_comment=False, out_path=None)
     ]
     used_main_unwrap = False
     effective_tree = tree
-    local_funcs = []
+    local_funcs = [s for s in tree.body if isinstance(s, ast.FunctionDef)]
 
     # If there is no direct top-level executable code but there is a canonical
     # main guard that calls main(), transpile the main() body as program body.
