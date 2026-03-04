@@ -2134,6 +2134,16 @@ class translator(ast.NodeVisitor):
                 return "int"
             if (
                 isinstance(node.func, ast.Attribute)
+                and node.func.attr == "uniform"
+            ):
+                return "real"
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "integers"
+            ):
+                return "int"
+            if (
+                isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
                 and node.func.attr in {"mean", "var", "std", "log2", "log10", "nansum", "nanmean", "nanvar", "nanstd", "nanmin", "nanmax"}
@@ -2443,6 +2453,24 @@ class translator(ast.NodeVisitor):
                 return f"size({self.expr(node.args[1])})"
             if (
                 isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"uniform", "integers"}
+            ):
+                size_node = None
+                for kw in node.keywords:
+                    if kw.arg == "size":
+                        size_node = kw.value
+                        break
+                if size_node is None:
+                    return None
+                if isinstance(size_node, (ast.Tuple, ast.List)):
+                    if len(size_node.elts) >= 1:
+                        if len(size_node.elts) == 1:
+                            return f"({self.expr(size_node.elts[0])})"
+                        return f"(({self.expr(size_node.elts[0])})*({self.expr(size_node.elts[1])}))"
+                    return None
+                return self.expr(size_node)
+            if (
+                isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "np"
                 and node.func.attr in {"matmul", "dot", "identity"}
@@ -2634,6 +2662,17 @@ class translator(ast.NodeVisitor):
                     return 1
                 if node.func.attr == "searchsorted" and len(node.args) >= 2:
                     return self._rank_expr(node.args[1])
+                if node.func.attr in {"uniform", "integers"}:
+                    size_node = None
+                    for kw in node.keywords:
+                        if kw.arg == "size":
+                            size_node = kw.value
+                            break
+                    if size_node is None:
+                        return 0
+                    if isinstance(size_node, (ast.Tuple, ast.List)):
+                        return max(1, len(size_node.elts))
+                    return 1
                 if node.func.attr == "broadcast_to" and len(node.args) >= 2:
                     shp = node.args[1]
                     if isinstance(shp, (ast.Tuple, ast.List)):
@@ -2784,6 +2823,21 @@ class translator(ast.NodeVisitor):
                 if len(node.args) >= 1:
                     return max(1, len(node.args))
                 return self._rank_expr(node.func.value)
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {"normal", "uniform", "integers"}:
+                size_node = None
+                if len(node.args) >= 1 and node.func.attr == "normal":
+                    size_node = node.args[0]
+                if len(node.args) >= 3 and node.func.attr in {"uniform", "integers"}:
+                    size_node = node.args[2]
+                for kw in node.keywords:
+                    if kw.arg == "size":
+                        size_node = kw.value
+                        break
+                if size_node is None:
+                    return 0
+                if isinstance(size_node, (ast.Tuple, ast.List)):
+                    return max(1, len(size_node.elts))
+                return 1
             if isinstance(node.func, ast.Attribute) and node.func.attr == "dot" and len(node.args) >= 1:
                 r1 = self._rank_expr(node.func.value)
                 r2 = self._rank_expr(node.args[0])
@@ -6063,6 +6117,127 @@ class translator(ast.NodeVisitor):
                     self.o.w(f"{t.id} = {t.id} + ({self.expr(loc_node)})")
                 if scale_node is not None:
                     self.o.w(f"{t.id} = ({self.expr(scale_node)}) * {t.id}")
+            return
+
+        # x = rng.uniform(low, high, size=...) / np.random.uniform(...)
+        if (
+            isinstance(t, ast.Name)
+            and isinstance(v, ast.Call)
+            and isinstance(v.func, ast.Attribute)
+            and v.func.attr == "uniform"
+        ):
+            low_node = None
+            high_node = None
+            size_node = None
+            if len(v.args) >= 1:
+                low_node = v.args[0]
+            if len(v.args) >= 2:
+                high_node = v.args[1]
+            if len(v.args) >= 3:
+                size_node = v.args[2]
+            for kw in v.keywords:
+                if kw.arg in {"low", "loc"}:
+                    low_node = kw.value
+                elif kw.arg in {"high", "scale"}:
+                    high_node = kw.value
+                elif kw.arg == "size":
+                    size_node = kw.value
+            if low_node is None:
+                low_node = ast.Constant(value=0.0)
+            if high_node is None:
+                high_node = ast.Constant(value=1.0)
+            low_expr = self.expr(low_node)
+            high_expr = self.expr(high_node)
+            if size_node is None:
+                self.o.w(f"call random_number({t.id})")
+                self.o.w(f"{t.id} = ({low_expr}) + (({high_expr}) - ({low_expr})) * {t.id}")
+                return
+            self.o.w(f"if (allocated({t.id})) deallocate({t.id})")
+            if isinstance(size_node, (ast.Tuple, ast.List)):
+                if len(size_node.elts) == 2:
+                    n0 = self.expr(size_node.elts[0])
+                    n1 = self.expr(size_node.elts[1])
+                    self.o.w(f"allocate({t.id}(1:{n0},1:{n1}))")
+                elif len(size_node.elts) == 1:
+                    n0 = self.expr(size_node.elts[0])
+                    self.o.w(f"allocate({t.id}(1:{n0}))")
+                else:
+                    raise NotImplementedError("uniform size tuple rank > 2 not supported")
+            else:
+                n0 = self.expr(size_node)
+                self.o.w(f"allocate({t.id}(1:{n0}))")
+            self.o.w(f"call random_number({t.id})")
+            self.o.w(f"{t.id} = ({low_expr}) + (({high_expr}) - ({low_expr})) * {t.id}")
+            return
+
+        # z = rng.integers(low, high, size=...)
+        if (
+            isinstance(t, ast.Name)
+            and isinstance(v, ast.Call)
+            and isinstance(v.func, ast.Attribute)
+            and v.func.attr == "integers"
+        ):
+            low_node = None
+            high_node = None
+            size_node = None
+            if len(v.args) >= 1:
+                low_node = v.args[0]
+            if len(v.args) >= 2:
+                high_node = v.args[1]
+            if len(v.args) >= 3:
+                size_node = v.args[2]
+            for kw in v.keywords:
+                if kw.arg == "low":
+                    low_node = kw.value
+                elif kw.arg == "high":
+                    high_node = kw.value
+                elif kw.arg == "size":
+                    size_node = kw.value
+            if low_node is None:
+                low_node = ast.Constant(value=0)
+            if high_node is None:
+                raise NotImplementedError("rng.integers requires high")
+            low_expr = self.expr(low_node)
+            high_expr = self.expr(high_node)
+            if size_node is None:
+                self.o.w("block")
+                self.o.push()
+                self.o.w("real(kind=dp) :: u_int")
+                self.o.w("call random_number(u_int)")
+                self.o.w(f"{t.id} = int({low_expr}) + int(u_int * real(max(1, int({high_expr}) - int({low_expr})), kind=dp))")
+                self.o.pop()
+                self.o.w("end block")
+                return
+            self.o.w(f"if (allocated({t.id})) deallocate({t.id})")
+            if isinstance(size_node, (ast.Tuple, ast.List)):
+                if len(size_node.elts) == 2:
+                    n0 = self.expr(size_node.elts[0])
+                    n1 = self.expr(size_node.elts[1])
+                    self.o.w(f"allocate({t.id}(1:{n0},1:{n1}))")
+                elif len(size_node.elts) == 1:
+                    n0 = self.expr(size_node.elts[0])
+                    self.o.w(f"allocate({t.id}(1:{n0}))")
+                else:
+                    raise NotImplementedError("integers size tuple rank > 2 not supported")
+            else:
+                n0 = self.expr(size_node)
+                self.o.w(f"allocate({t.id}(1:{n0}))")
+            self.o.w("block")
+            self.o.push()
+            self.o.w("integer :: i_rng")
+            self.o.w("real(kind=dp), allocatable :: u_rng(:)")
+            self.o.w(f"allocate(u_rng(1:size({t.id})))")
+            self.o.w("call random_number(u_rng)")
+            self.o.w(f"do i_rng = 1, size({t.id})")
+            self.o.push()
+            self.o.w(
+                f"{t.id}(i_rng) = int({low_expr}) + int(u_rng(i_rng) * real(max(1, int({high_expr}) - int({low_expr})), kind=dp))"
+            )
+            self.o.pop()
+            self.o.w("end do")
+            self.o.w("if (allocated(u_rng)) deallocate(u_rng)")
+            self.o.pop()
+            self.o.w("end block")
             return
 
         # z = rng.choice(2, size=n, p=w)
